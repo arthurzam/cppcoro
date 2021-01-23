@@ -24,6 +24,9 @@ export(EXPORT cppcoroTargets
 configure_file(cmake/cppcoroConfig.cmake
     "${PROJECT_BINARY_DIR}/cppcoro/cppcoroConfig.cmake"
     COPYONLY)
+configure_file(cmake/FindCoroutines.cmake
+    "${PROJECT_BINARY_DIR}/cppcoro/FindCoroutines.cmake"
+    COPYONLY)
 
 set(config_package_location lib/cmake/cppcoro)
 install(DIRECTORY include/cppcoro
