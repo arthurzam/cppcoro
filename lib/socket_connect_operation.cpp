@@ -20,7 +20,7 @@
 # include <Windows.h>
 
 bool cppcoro::net::socket_connect_operation_impl::try_start(
-	cppcoro::detail::win32_overlapped_operation_base& operation) noexcept
+	cppcoro::detail::io_operation_base& operation) noexcept
 {
 	// Lookup the address of the ConnectEx function pointer for this socket.
 	LPFN_CONNECTEX connectExPtr;
@@ -86,7 +86,7 @@ bool cppcoro::net::socket_connect_operation_impl::try_start(
 }
 
 void cppcoro::net::socket_connect_operation_impl::cancel(
-	cppcoro::detail::win32_overlapped_operation_base& operation) noexcept
+	cppcoro::detail::io_operation_base& operation) noexcept
 {
 	(void)::CancelIoEx(
 		reinterpret_cast<HANDLE>(m_socket.native_handle()),
@@ -94,7 +94,7 @@ void cppcoro::net::socket_connect_operation_impl::cancel(
 }
 
 void cppcoro::net::socket_connect_operation_impl::get_result(
-	cppcoro::detail::win32_overlapped_operation_base& operation)
+	cppcoro::detail::io_operation_base& operation)
 {
 	if (operation.m_errorCode != ERROR_SUCCESS)
 	{
@@ -173,6 +173,41 @@ void cppcoro::net::socket_connect_operation_impl::get_result(
 			m_socket.m_remoteEndPoint = m_remoteEndPoint;
 		}
 	}
+}
+
+#else
+
+bool cppcoro::net::socket_connect_operation_impl::try_start(
+    cppcoro::detail::io_operation_base& operation) noexcept
+{
+    SOCKADDR_STORAGE remoteSockaddrStorage;
+    const int remoteLength =
+	    detail::ip_endpoint_to_sockaddr(m_remoteEndPoint, std::ref(remoteSockaddrStorage));
+    return operation.m_ioQueue.transaction(operation.m_message)
+        .connect(m_socket.native_handle(), &remoteSockaddrStorage, remoteLength)
+        .commit();
+}
+
+void cppcoro::net::socket_connect_operation_impl::cancel(
+    cppcoro::detail::io_operation_base& operation) noexcept
+{
+    operation.m_ioQueue.transaction(operation.m_message)
+		.cancel()
+		.commit();
+}
+
+void cppcoro::net::socket_connect_operation_impl::get_result(
+    cppcoro::detail::io_operation_base& operation)
+{
+    SOCKADDR_STORAGE remoteSockaddrStorage;
+    socklen_t remoteSockaddrStorageLength = sizeof(remoteSockaddrStorage);
+    if(getpeername(m_socket.native_handle(), reinterpret_cast<sockaddr*>(&remoteSockaddrStorage), &remoteSockaddrStorageLength) < 0) {
+        throw std::system_error{
+            errno,
+            std::generic_category()
+        };
+    }
+    m_socket.m_remoteEndPoint = detail::sockaddr_to_ip_endpoint(std::ref(*reinterpret_cast<sockaddr*>(&remoteSockaddrStorage)));
 }
 
 #endif

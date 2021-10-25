@@ -10,6 +10,7 @@
 #include <cassert>
 #include <algorithm>
 #include <thread>
+#include <vector>
 
 #if CPPCORO_OS_WINNT
 # ifndef WIN32_LEAN_AND_MEAN
@@ -22,6 +23,15 @@
 # include <WS2tcpip.h>
 # include <MSWSock.h>
 # include <Windows.h>
+#endif
+
+
+#if CPPCORO_OS_LINUX
+#include <cppcoro/operation_cancelled.hpp>
+#include <cppcoro/detail/linux_io_operation.hpp>
+typedef int DWORD;
+#define INFINITE (DWORD)-1 //needed for timeout values in io_service::timer_thread_state::run()
+typedef long long int LONGLONG;
 #endif
 
 namespace
@@ -78,7 +88,7 @@ namespace
 		return cppcoro::detail::win32::safe_handle{ handle };
 	}
 #endif
-}
+}  // namespace
 
 /// \brief
 /// A queue of pending timers that supports efficiently determining
@@ -293,6 +303,7 @@ void cppcoro::io_service::timer_queue::remove_cancelled_timers(
 	}
 }
 
+#if CPPCORO_OS_WINNT
 class cppcoro::io_service::timer_thread_state
 {
 public:
@@ -320,24 +331,37 @@ public:
 
 	std::thread m_thread;
 };
-
-
+#endif
 
 cppcoro::io_service::io_service()
+#if CPPCORO_OS_WINNT
 	: io_service(0)
+#elif CPPCORO_OS_LINUX
+	: io_service(10)
+#endif
 {
 }
 
-cppcoro::io_service::io_service(std::uint32_t concurrencyHint)
+cppcoro::io_service::io_service(
+#if CPPCORO_OS_WINNT
+	std::uint32_t concurrencyHint
+#elif CPPCORO_OS_LINUX
+	size_t queue_length
+#endif
+	)
 	: m_threadState(0)
 	, m_workCount(0)
 #if CPPCORO_OS_WINNT
 	, m_iocpHandle(create_io_completion_port(concurrencyHint))
 	, m_winsockInitialised(false)
 	, m_winsockInitialisationMutex()
+#elif CPPCORO_OS_LINUX
+    , m_uq(std::max(queue_length, size_t(10)))
 #endif
 	, m_scheduleOperations(nullptr)
+#if CPPCORO_OS_WINNT
 	, m_timerState(nullptr)
+#endif
 {
 }
 
@@ -346,7 +370,9 @@ cppcoro::io_service::~io_service()
 	assert(m_scheduleOperations.load(std::memory_order_relaxed) == nullptr);
 	assert(m_threadState.load(std::memory_order_relaxed) < active_thread_count_increment);
 
+#if CPPCORO_OS_WINNT
 	delete m_timerState.load(std::memory_order_relaxed);
+#endif
 
 #if CPPCORO_OS_WINNT
 	if (m_winsockInitialised.load(std::memory_order_relaxed))
@@ -471,12 +497,11 @@ void cppcoro::io_service::notify_work_finished() noexcept
 	}
 }
 
+#if CPPCORO_OS_WINNT
 cppcoro::detail::win32::handle_t cppcoro::io_service::native_iocp_handle() noexcept
 {
 	return m_iocpHandle.handle();
 }
-
-#if CPPCORO_OS_WINNT
 
 void cppcoro::io_service::ensure_winsock_initialised()
 {
@@ -512,6 +537,10 @@ void cppcoro::io_service::schedule_impl(schedule_operation* operation) noexcept
 		0,
 		reinterpret_cast<ULONG_PTR>(operation->m_awaiter.address()),
 		nullptr);
+#elif CPPCORO_OS_LINUX
+    operation->m_message = operation->m_awaiter;
+	bool ok = m_uq.transaction(operation->m_message).nop().commit();
+#endif
 	if (!ok)
 	{
 		// Failed to post to the I/O completion port.
@@ -531,21 +560,24 @@ void cppcoro::io_service::schedule_impl(schedule_operation* operation) noexcept
 			std::memory_order_release,
 			std::memory_order_acquire));
 	}
-#endif
 }
 
 void cppcoro::io_service::try_reschedule_overflow_operations() noexcept
 {
+    auto* operation = m_scheduleOperations.exchange(nullptr, std::memory_order_acquire);
+    while (operation != nullptr)
+    {
+        auto* next = operation->m_next;
 #if CPPCORO_OS_WINNT
-	auto* operation = m_scheduleOperations.exchange(nullptr, std::memory_order_acquire);
-	while (operation != nullptr)
-	{
-		auto* next = operation->m_next;
 		BOOL ok = ::PostQueuedCompletionStatus(
 			m_iocpHandle.handle(),
 			0,
 			reinterpret_cast<ULONG_PTR>(operation->m_awaiter.address()),
 			nullptr);
+#else
+        operation->m_message = operation->m_awaiter;
+        bool ok = m_uq.transaction(operation->m_message).nop().commit();
+#endif
 		if (!ok)
 		{
 			// Still unable to queue these operations.
@@ -571,7 +603,6 @@ void cppcoro::io_service::try_reschedule_overflow_operations() noexcept
 
 		operation = next;
 	}
-#endif
 }
 
 bool cppcoro::io_service::try_enter_event_loop() noexcept
@@ -598,12 +629,12 @@ void cppcoro::io_service::exit_event_loop() noexcept
 
 bool cppcoro::io_service::try_process_one_event(bool waitForEvent)
 {
-#if CPPCORO_OS_WINNT
 	if (is_stop_requested())
 	{
 		return false;
 	}
 
+#if CPPCORO_OS_WINNT
 	const DWORD timeout = waitForEvent ? INFINITE : 0;
 
 	while (true)
@@ -673,6 +704,47 @@ bool cppcoro::io_service::try_process_one_event(bool waitForEvent)
 			};
 		}
 	}
+#else
+	while (true)
+	{
+		try_reschedule_overflow_operations();
+
+		detail::lnx::io_message* message = nullptr;
+
+		bool status;
+
+		try
+		{
+			status = m_uq.dequeue(message, waitForEvent);
+		}
+		catch (std::system_error& err)
+		{
+			if (err.code() == std::errc::interrupted &&
+				(m_threadState.load(std::memory_order_relaxed) & stop_requested_flag) == 0)
+			{
+				return false;
+			}
+			else
+			{
+				throw err;
+			}
+		}
+
+		if (!status)
+		{
+			return false;
+		}
+
+		if (message != nullptr && message->resume != nullptr) {
+		    message->resume();
+        }
+
+        if (is_stop_requested())
+        {
+            return false;
+        }
+        return true;
+	}
 #endif
 }
 
@@ -685,9 +757,13 @@ void cppcoro::io_service::post_wake_up_event() noexcept
 	// and the system is out of memory. In this case threads should find other events
 	// in the queue next time they check anyway and thus wake-up.
 	(void)::PostQueuedCompletionStatus(m_iocpHandle.handle(), 0, 0, nullptr);
+#else
+	static detail::lnx::io_message nop;
+	m_uq.transaction(nop).nop().commit();
 #endif
 }
 
+#if CPPCORO_OS_WINNT
 cppcoro::io_service::timer_thread_state*
 cppcoro::io_service::ensure_timer_thread_started()
 {
@@ -712,10 +788,8 @@ cppcoro::io_service::ensure_timer_thread_started()
 }
 
 cppcoro::io_service::timer_thread_state::timer_thread_state()
-#if CPPCORO_OS_WINNT
 	: m_wakeUpEvent(create_auto_reset_event())
 	, m_waitableTimerEvent(create_waitable_timer_event())
-#endif
 	, m_newlyQueuedTimers(nullptr)
 	, m_timerCancellationRequested(false)
 	, m_shutDownRequested(false)
@@ -742,7 +816,6 @@ void cppcoro::io_service::timer_thread_state::request_timer_cancellation() noexc
 
 void cppcoro::io_service::timer_thread_state::run() noexcept
 {
-#if CPPCORO_OS_WINNT
 	using clock = std::chrono::high_resolution_clock;
 	using time_point = clock::time_point;
 
@@ -900,18 +973,16 @@ void cppcoro::io_service::timer_thread_state::run() noexcept
 			timersReadyToResume = nextTimer;
 		}
 	}
-#endif
 }
 
 void cppcoro::io_service::timer_thread_state::wake_up_timer_thread() noexcept
 {
-#if CPPCORO_OS_WINNT
 	(void)::SetEvent(m_wakeUpEvent.handle());
-#endif
 }
+#endif
 
 void cppcoro::io_service::schedule_operation::await_suspend(
-	cppcoro::coroutine_handle<> awaiter) noexcept
+	coroutine_handle<> awaiter) noexcept
 {
 	m_awaiter = awaiter;
 	m_service.schedule_impl(this);
@@ -926,6 +997,11 @@ cppcoro::io_service::timed_schedule_operation::timed_schedule_operation(
 	, m_cancellationToken(std::move(cancellationToken))
 	, m_refCount(2)
 {
+#if CPPCORO_OS_LINUX
+    m_cancellationRegistration.emplace(std::move(m_cancellationToken), [&service, this] {
+        service.io_queue().transaction(m_message).timeout_remove().commit();
+    });
+#endif
 }
 
 cppcoro::io_service::timed_schedule_operation::timed_schedule_operation(
@@ -947,12 +1023,13 @@ bool cppcoro::io_service::timed_schedule_operation::await_ready() const noexcept
 }
 
 void cppcoro::io_service::timed_schedule_operation::await_suspend(
-	cppcoro::coroutine_handle<> awaiter)
+	coroutine_handle<> awaiter)
 {
 	m_scheduleOperation.m_awaiter = awaiter;
 
 	auto& service = m_scheduleOperation.m_service;
 
+#if CPPCORO_OS_WINNT
 	// Ensure the timer state is initialised and the timer thread started.
 	auto* timerState = service.ensure_timer_thread_started();
 
@@ -1000,6 +1077,12 @@ void cppcoro::io_service::timed_schedule_operation::await_suspend(
 	{
 		timerState->wake_up_timer_thread();
 	}
+#elif CPPCORO_OS_LINUX
+    auto timeout = detail::duration_to_event_timespec(m_resumeTime - std::chrono::high_resolution_clock::now());
+    m_message = m_scheduleOperation.m_awaiter;
+    service.io_queue().transaction(m_message)
+        .timeout(&timeout).commit();
+#endif
 
 	// Use 'acquire' semantics here to synchronise with the 'release'
 	// operation performed on the timer thread to ensure that we have
@@ -1017,4 +1100,15 @@ void cppcoro::io_service::timed_schedule_operation::await_resume()
 {
 	m_cancellationRegistration.reset();
 	m_cancellationToken.throw_if_cancellation_requested();
+#if CPPCORO_OS_LINUX
+    if (m_message.result == -ETIME) {
+    } else if (m_message.result == -ECANCELED) {
+        throw operation_cancelled{};
+    } else if (m_message.result < 0) {
+        throw std::system_error {
+            -m_message.result,
+            std::generic_category()
+        };
+	}
+#endif
 }

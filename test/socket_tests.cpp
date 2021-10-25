@@ -52,7 +52,7 @@ TEST_CASE("TCP/IPv4 connect/disconnect")
 
 	task<int> serverTask;
 
-	auto server = [&](socket listeningSocket) -> task<int>
+	auto server = [&](net::socket listeningSocket) -> task<int>
 	{
 		auto s = socket::create_tcpv4(ioSvc);
 		co_await listeningSocket.accept(s);
@@ -212,7 +212,11 @@ TEST_CASE("send/recv TCP/IPv4")
 
 TEST_CASE("send/recv TCP/IPv4 many connections")
 {
-	io_service ioSvc;
+#if CPPCORO_USE_IO_RING
+    io_service ioSvc{128};
+#else
+    io_service ioSvc{};
+#endif
 
 	auto listeningSocket = socket::create_tcpv4(ioSvc);
 
@@ -221,7 +225,7 @@ TEST_CASE("send/recv TCP/IPv4 many connections")
 
 	cancellation_source canceller;
 
-	auto handleConnection = [](socket s) -> task<void>
+	auto handleConnection = [](net::socket s) -> task<void>
 	{
 		std::uint8_t buffer[64];
 		std::size_t bytesReceived;
@@ -366,9 +370,13 @@ TEST_CASE("send/recv TCP/IPv4 many connections")
 
 TEST_CASE("udp send_to/recv_from")
 {
-	io_service ioSvc;
+#if CPPCORO_USE_IO_RING
+	io_service ioSvc{128};
+#else
+    io_service ioSvc{};
+#endif
 
-	auto server = [&](socket serverSocket) -> task<int>
+	auto server = [&](net::socket serverSocket) -> task<int>
 	{
 		std::uint8_t buffer[100];
 

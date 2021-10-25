@@ -19,8 +19,8 @@ struct io_service_fixture
 {
 public:
 
-	io_service_fixture(std::uint32_t threadCount = 1)
-		: m_ioService()
+	io_service_fixture(std::uint32_t threadCount = 1, std::uint32_t concurrencyHint = 0)
+		: m_ioService(concurrencyHint)
 	{
 		m_ioThreads.reserve(threadCount);
 		try
@@ -60,11 +60,11 @@ private:
 
 };
 
-template<std::uint32_t thread_count>
+template<std::uint32_t thread_count, std::uint32_t concurrency_hint = 0>
 struct io_service_fixture_with_threads : io_service_fixture
 {
 	io_service_fixture_with_threads()
-		: io_service_fixture(thread_count)
+		: io_service_fixture(thread_count, concurrency_hint)
 	{}
 };
 

@@ -138,9 +138,13 @@ TEST_CASE("task of reference type")
 		SUBCASE("awaiting rvalue task")
 		{
 			decltype(auto) result = co_await f();
+            // MSVC 19.xx fails to handle this assertion
+			// making all the test file failing to compile with weird errors
+#if !CPPCORO_COMPILER_MSVC || CPPCORO_COMPILER_MSVC < 19'00'00000
 			static_assert(
 				std::is_same<decltype(result), int&>::value,
 				"co_await r-value reference of task<int&> should result in an int&");
+#endif
 			CHECK(&result == &value);
 		}
 
@@ -148,9 +152,11 @@ TEST_CASE("task of reference type")
 		{
 			auto t = f();
 			decltype(auto) result = co_await t;
+#if !CPPCORO_COMPILER_MSVC || CPPCORO_COMPILER_MSVC < 19'00'00000
 			static_assert(
 				std::is_same<decltype(result), int&>::value,
 				"co_await l-value reference of task<int&> should result in an int&");
+#endif
 			CHECK(&result == &value);
 		}
 	}());

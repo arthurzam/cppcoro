@@ -13,6 +13,8 @@
 
 #if CPPCORO_OS_WINNT
 # include <cppcoro/detail/win32.hpp>
+#else
+# include <cppcoro/detail/linux.hpp>
 #endif
 
 #include <cppcoro/filesystem.hpp>
@@ -34,20 +36,20 @@ namespace cppcoro
 
 	protected:
 
-#if CPPCORO_OS_WINNT
-		file(detail::win32::safe_handle&& fileHandle) noexcept;
+		explicit file(detail::safe_handle&& fileHandle) noexcept;
 
-		static detail::win32::safe_handle open(
-			detail::win32::dword_t fileAccess,
+		static detail::safe_handle open(
+			detail::dword_t fileAccess,
 			io_service& ioService,
-			const cppcoro::filesystem::path& path,
+			const filesystem::path& path,
 			file_open_mode openMode,
 			file_share_mode shareMode,
 			file_buffering_mode bufferingMode);
 
-		detail::win32::safe_handle m_fileHandle;
+		detail::safe_handle m_fileHandle;
+#if CPPCORO_OS_LINUX
+		io_service *m_ioService;
 #endif
-
 	};
 }
 

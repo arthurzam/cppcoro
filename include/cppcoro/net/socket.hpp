@@ -92,10 +92,10 @@ namespace cppcoro
 
 			socket& operator=(socket&& other) noexcept;
 
-#if CPPCORO_OS_WINNT
-			/// Get the Win32 socket handle assocaited with this socket.
-			cppcoro::detail::win32::socket_t native_handle() noexcept { return m_handle; }
+            /// Get the socket handle associated with this socket.
+            auto native_handle() noexcept { return m_handle; }
 
+#if CPPCORO_OS_WINNT
 			/// Query whether I/O operations that complete synchronously will skip posting
 			/// an I/O completion event to the I/O completion port.
 			///
@@ -246,16 +246,26 @@ namespace cppcoro
 
 			friend class socket_accept_operation_impl;
 			friend class socket_connect_operation_impl;
+            friend class socket_recv_from_operation_impl;
+            friend class socket_recv_operation_impl;
+            friend class socket_send_to_operation_impl;
 
 #if CPPCORO_OS_WINNT
 			explicit socket(
 				cppcoro::detail::win32::socket_t handle,
 				bool skipCompletionOnSuccess) noexcept;
+#elif CPPCORO_OS_LINUX
+			explicit socket(detail::lnx::io_queue& ioQueue,
+							cppcoro::detail::lnx::fd_t fd) noexcept;
 #endif
 
 #if CPPCORO_OS_WINNT
 			cppcoro::detail::win32::socket_t m_handle;
 			bool m_skipCompletionOnSuccess;
+#elif CPPCORO_OS_LINUX
+			cppcoro::detail::lnx::fd_t m_handle = -1;
+            cppcoro::detail::lnx::io_queue& m_ioQueue;
+			int m_recvFlags = 0;
 #endif
 
 			ip_endpoint m_localEndPoint;

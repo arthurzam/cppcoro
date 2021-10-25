@@ -21,11 +21,21 @@
 # include <WS2tcpip.h>
 # include <MSWSock.h>
 # include <Windows.h>
+#define last_error WSAGetLastError()
+#elif CPPCORO_OS_LINUX
+#include <cstring>
+#include <netinet/in.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+
+#define last_error errno
+#endif
 
 namespace
 {
 	namespace local
 	{
+#if CPPCORO_OS_WINNT
 		std::tuple<SOCKET, bool> create_socket(
 			int addressFamily,
 			int socketType,
@@ -192,17 +202,35 @@ namespace
 
 			return std::make_tuple(socketHandle, skipCompletionPortOnSuccess);
 		}
-	}
-}
+#else
+		int create_socket(int domain, int type, int protocol) {
+			int sock = socket(domain, type, protocol);
+			if (sock < 0)
+			{
+                throw std::system_error(
+                    last_error, std::system_category(), "Error creating socket: socket");
+			}
+			return sock;
+		}
+#endif
+	}  // namespace local
+}  // namespace
 
 cppcoro::net::socket cppcoro::net::socket::create_tcpv4(io_service& ioSvc)
 {
+#if CPPCORO_OS_WINNT
 	ioSvc.ensure_winsock_initialised();
 
 	auto[socketHandle, skipCompletionPortOnSuccess] = local::create_socket(
 		AF_INET, SOCK_STREAM, IPPROTO_TCP, ioSvc.native_iocp_handle());
 
 	socket result(socketHandle, skipCompletionPortOnSuccess);
+
+#elif CPPCORO_OS_LINUX
+	auto socketHandle = local::create_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	socket result(ioSvc.io_queue(), socketHandle);
+#endif
+
 	result.m_localEndPoint = ipv4_endpoint();
 	result.m_remoteEndPoint = ipv4_endpoint();
 	return result;
@@ -210,12 +238,19 @@ cppcoro::net::socket cppcoro::net::socket::create_tcpv4(io_service& ioSvc)
 
 cppcoro::net::socket cppcoro::net::socket::create_tcpv6(io_service& ioSvc)
 {
+#if CPPCORO_OS_WINNT
 	ioSvc.ensure_winsock_initialised();
 
 	auto[socketHandle, skipCompletionPortOnSuccess] = local::create_socket(
 		AF_INET6, SOCK_STREAM, IPPROTO_TCP, ioSvc.native_iocp_handle());
 
 	socket result(socketHandle, skipCompletionPortOnSuccess);
+
+#elif CPPCORO_OS_LINUX
+	auto socketHandle = local::create_socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+    socket result(ioSvc.io_queue(), socketHandle);
+#endif
+
 	result.m_localEndPoint = ipv6_endpoint();
 	result.m_remoteEndPoint = ipv6_endpoint();
 	return result;
@@ -223,12 +258,22 @@ cppcoro::net::socket cppcoro::net::socket::create_tcpv6(io_service& ioSvc)
 
 cppcoro::net::socket cppcoro::net::socket::create_udpv4(io_service& ioSvc)
 {
+#if CPPCORO_OS_WINNT
 	ioSvc.ensure_winsock_initialised();
 
 	auto[socketHandle, skipCompletionPortOnSuccess] = local::create_socket(
 		AF_INET, SOCK_DGRAM, IPPROTO_UDP, ioSvc.native_iocp_handle());
 
 	socket result(socketHandle, skipCompletionPortOnSuccess);
+
+#elif CPPCORO_OS_LINUX
+	auto socketHandle = local::create_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	socket result(ioSvc.io_queue(), socketHandle);
+	// we use MSG_TRUNC flag to detect whatever the incoming datagram
+	// fits within size, linux does not a MORE_DATA like error code.
+	result.m_recvFlags = MSG_TRUNC;
+#endif
+
 	result.m_localEndPoint = ipv4_endpoint();
 	result.m_remoteEndPoint = ipv4_endpoint();
 	return result;
@@ -236,12 +281,22 @@ cppcoro::net::socket cppcoro::net::socket::create_udpv4(io_service& ioSvc)
 
 cppcoro::net::socket cppcoro::net::socket::create_udpv6(io_service& ioSvc)
 {
+#if CPPCORO_OS_WINNT
 	ioSvc.ensure_winsock_initialised();
 
 	auto[socketHandle, skipCompletionPortOnSuccess] = local::create_socket(
 		AF_INET6, SOCK_DGRAM, IPPROTO_UDP, ioSvc.native_iocp_handle());
 
 	socket result(socketHandle, skipCompletionPortOnSuccess);
+
+#elif CPPCORO_OS_LINUX
+	auto socketHandle = local::create_socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+	socket result(ioSvc.io_queue(), socketHandle);
+	// we use MSG_TRUNC flag to detect whatever the incoming datagram
+	// fits within size, linux does not a MORE_DATA like error code.
+	result.m_recvFlags = MSG_TRUNC;
+#endif
+
 	result.m_localEndPoint = ipv6_endpoint();
 	result.m_remoteEndPoint = ipv6_endpoint();
 	return result;
@@ -249,7 +304,12 @@ cppcoro::net::socket cppcoro::net::socket::create_udpv6(io_service& ioSvc)
 
 cppcoro::net::socket::socket(socket&& other) noexcept
 	: m_handle(std::exchange(other.m_handle, INVALID_SOCKET))
+#if CPPCORO_OS_WINNT
 	, m_skipCompletionOnSuccess(other.m_skipCompletionOnSuccess)
+#elif CPPCORO_OS_LINUX
+	, m_ioQueue(other.m_ioQueue)
+	, m_recvFlags(other.m_recvFlags)
+#endif
 	, m_localEndPoint(std::move(other.m_localEndPoint))
 	, m_remoteEndPoint(std::move(other.m_remoteEndPoint))
 {}
@@ -272,7 +332,11 @@ cppcoro::net::socket::operator=(socket&& other) noexcept
 	}
 
 	m_handle = handle;
+#if CPPCORO_OS_WINNT
 	m_skipCompletionOnSuccess = other.m_skipCompletionOnSuccess;
+#elif CPPCORO_OS_LINUX
+	m_recvFlags = other.m_recvFlags;
+#endif
 	m_localEndPoint = other.m_localEndPoint;
 	m_remoteEndPoint = other.m_remoteEndPoint;
 
@@ -288,14 +352,14 @@ void cppcoro::net::socket::bind(const ip_endpoint& localEndPoint)
 		SOCKADDR_IN& ipv4Sockaddr = *reinterpret_cast<SOCKADDR_IN*>(sockaddr);
 		ipv4Sockaddr.sin_family = AF_INET;
 		std::memcpy(&ipv4Sockaddr.sin_addr, localEndPoint.to_ipv4().address().bytes(), 4);
-		ipv4Sockaddr.sin_port = localEndPoint.to_ipv4().port();
+		ipv4Sockaddr.sin_port = htons(localEndPoint.to_ipv4().port());
 	}
 	else
 	{
 		SOCKADDR_IN6& ipv6Sockaddr = *reinterpret_cast<SOCKADDR_IN6*>(sockaddr);
 		ipv6Sockaddr.sin6_family = AF_INET6;
 		std::memcpy(&ipv6Sockaddr.sin6_addr, localEndPoint.to_ipv6().address().bytes(), 16);
-		ipv6Sockaddr.sin6_port = localEndPoint.to_ipv6().port();
+		ipv6Sockaddr.sin6_port = htons(localEndPoint.to_ipv6().port());
 	}
 
 	int result = ::bind(m_handle, sockaddr, sizeof(sockaddrStorage));
@@ -311,14 +375,13 @@ void cppcoro::net::socket::bind(const ip_endpoint& localEndPoint)
 		// WSAEINVAL: socket already bound
 		// WSAENOBUFS: system failed to allocate memory
 		// WSAENOTSOCK: socket was not a valid socket.
-		int errorCode = ::WSAGetLastError();
 		throw std::system_error(
-			errorCode,
+            last_error,
 			std::system_category(),
 			"Error binding to endpoint: bind()");
 	}
 
-	int sockaddrLen = sizeof(sockaddrStorage);
+	socklen_t sockaddrLen = sizeof(sockaddrStorage);
 	result = ::getsockname(m_handle, sockaddr, &sockaddrLen);
 	if (result == 0)
 	{
@@ -335,9 +398,8 @@ void cppcoro::net::socket::listen()
 	int result = ::listen(m_handle, SOMAXCONN);
 	if (result != 0)
 	{
-		int errorCode = ::WSAGetLastError();
 		throw std::system_error(
-			errorCode,
+			last_error,
 			std::system_category(),
 			"Failed to start listening on bound endpoint: listen");
 	}
@@ -364,96 +426,178 @@ void cppcoro::net::socket::listen(std::uint32_t backlog)
 		// WSAENOTSOCK: socket was not a valid socket.
 		// WSAEOPNOTSUPP: The socket does not support listening
 
-		int errorCode = ::WSAGetLastError();
 		throw std::system_error(
-			errorCode,
-			std::system_category(),
-			"Failed to start listening on bound endpoint: listen");
+			last_error,
+			std::system_category(), "Failed to start listening on bound endpoint: listen");
 	}
 }
 
 cppcoro::net::socket_accept_operation
 cppcoro::net::socket::accept(socket& acceptingSocket) noexcept
 {
-	return socket_accept_operation{ *this, acceptingSocket };
+	return socket_accept_operation
+	{
+#if CPPCORO_OS_LINUX
+		m_ioQueue,
+#endif
+        *this, acceptingSocket
+	};
 }
 
 cppcoro::net::socket_accept_operation_cancellable
 cppcoro::net::socket::accept(socket& acceptingSocket, cancellation_token ct) noexcept
 {
-	return socket_accept_operation_cancellable{ *this, acceptingSocket, std::move(ct) };
+	return socket_accept_operation_cancellable
+	{
+#if CPPCORO_OS_LINUX
+        m_ioQueue,
+#endif
+        *this, acceptingSocket, std::move(ct)
+	};
 }
 
 cppcoro::net::socket_connect_operation
 cppcoro::net::socket::connect(const ip_endpoint& remoteEndPoint) noexcept
 {
-	return socket_connect_operation{ *this, remoteEndPoint };
+	return socket_connect_operation
+	{
+#if CPPCORO_OS_LINUX
+        m_ioQueue,
+#endif
+        *this, remoteEndPoint
+	};
 }
 
 cppcoro::net::socket_connect_operation_cancellable
 cppcoro::net::socket::connect(const ip_endpoint& remoteEndPoint, cancellation_token ct) noexcept
 {
-	return socket_connect_operation_cancellable{ *this, remoteEndPoint, std::move(ct) };
+	return socket_connect_operation_cancellable
+	{
+#if CPPCORO_OS_LINUX
+        m_ioQueue,
+#endif
+			*this, remoteEndPoint, std::move(ct)
+	};
 }
 
-cppcoro::net::socket_disconnect_operation
-cppcoro::net::socket::disconnect() noexcept
+cppcoro::net::socket_disconnect_operation cppcoro::net::socket::disconnect() noexcept
 {
-	return socket_disconnect_operation(*this);
+	return socket_disconnect_operation(
+#if CPPCORO_OS_LINUX
+		m_ioQueue,
+#endif
+		*this);
 }
 
 cppcoro::net::socket_disconnect_operation_cancellable
 cppcoro::net::socket::disconnect(cancellation_token ct) noexcept
 {
-	return socket_disconnect_operation_cancellable{ *this, std::move(ct) };
+	return socket_disconnect_operation_cancellable
+	{
+#if CPPCORO_OS_LINUX
+        m_ioQueue,
+#endif
+        *this, std::move(ct)
+	};
 }
 
 cppcoro::net::socket_send_operation
 cppcoro::net::socket::send(const void* buffer, std::size_t byteCount) noexcept
 {
-	return socket_send_operation{ *this, buffer, byteCount };
+	return socket_send_operation
+	{
+#if CPPCORO_OS_LINUX
+		m_ioQueue,
+#endif
+        *this, buffer, byteCount
+	};
 }
 
-cppcoro::net::socket_send_operation_cancellable
-cppcoro::net::socket::send(const void* buffer, std::size_t byteCount, cancellation_token ct) noexcept
+cppcoro::net::socket_send_operation_cancellable cppcoro::net::socket::send(
+	const void* buffer, std::size_t byteCount, cancellation_token ct) noexcept
 {
-	return socket_send_operation_cancellable{ *this, buffer, byteCount, std::move(ct) };
+	return socket_send_operation_cancellable
+	{
+#if CPPCORO_OS_LINUX
+        m_ioQueue,
+#endif
+        *this, buffer, byteCount, std::move(ct)
+	};
 }
 
 cppcoro::net::socket_recv_operation
 cppcoro::net::socket::recv(void* buffer, std::size_t byteCount) noexcept
 {
-	return socket_recv_operation{ *this, buffer, byteCount };
+	return socket_recv_operation
+	{
+#if CPPCORO_OS_LINUX
+		m_ioQueue,
+#endif
+        *this, buffer, byteCount
+	};
 }
 
 cppcoro::net::socket_recv_operation_cancellable
 cppcoro::net::socket::recv(void* buffer, std::size_t byteCount, cancellation_token ct) noexcept
 {
-	return socket_recv_operation_cancellable{ *this, buffer, byteCount, std::move(ct) };
+	return socket_recv_operation_cancellable
+	{
+#if CPPCORO_OS_LINUX
+        m_ioQueue,
+#endif
+        *this, buffer, byteCount, std::move(ct)
+	};
 }
 
 cppcoro::net::socket_recv_from_operation
 cppcoro::net::socket::recv_from(void* buffer, std::size_t byteCount) noexcept
 {
-	return socket_recv_from_operation{ *this, buffer, byteCount };
+	return socket_recv_from_operation
+	{
+#if CPPCORO_OS_LINUX
+		m_ioQueue,
+#endif
+        *this, buffer, byteCount
+	};
 }
 
 cppcoro::net::socket_recv_from_operation_cancellable
 cppcoro::net::socket::recv_from(void* buffer, std::size_t byteCount, cancellation_token ct) noexcept
 {
-	return socket_recv_from_operation_cancellable{ *this, buffer, byteCount, std::move(ct) };
+	return socket_recv_from_operation_cancellable
+	{
+#if CPPCORO_OS_LINUX
+		m_ioQueue,
+#endif
+        *this, buffer, byteCount, std::move(ct)
+	};
 }
 
-cppcoro::net::socket_send_to_operation
-cppcoro::net::socket::send_to(const ip_endpoint& destination, const void* buffer, std::size_t byteCount) noexcept
+cppcoro::net::socket_send_to_operation cppcoro::net::socket::send_to(
+	const ip_endpoint& destination, const void* buffer, std::size_t byteCount) noexcept
 {
-	return socket_send_to_operation{ *this, destination, buffer, byteCount };
+	return socket_send_to_operation
+	{
+#if CPPCORO_OS_LINUX
+        m_ioQueue,
+#endif
+        *this, destination, buffer, byteCount
+	};
 }
 
-cppcoro::net::socket_send_to_operation_cancellable
-cppcoro::net::socket::send_to(const ip_endpoint& destination, const void* buffer, std::size_t byteCount, cancellation_token ct) noexcept
+cppcoro::net::socket_send_to_operation_cancellable cppcoro::net::socket::send_to(
+	const ip_endpoint& destination,
+	const void* buffer,
+	std::size_t byteCount,
+	cancellation_token ct) noexcept
 {
-	return socket_send_to_operation_cancellable{ *this, destination, buffer, byteCount, std::move(ct) };
+	return socket_send_to_operation_cancellable
+	{
+#if CPPCORO_OS_LINUX
+        m_ioQueue,
+#endif
+        *this, destination, buffer, byteCount, std::move(ct)
+	};
 }
 
 void cppcoro::net::socket::close_send()
@@ -461,11 +605,8 @@ void cppcoro::net::socket::close_send()
 	int result = ::shutdown(m_handle, SD_SEND);
 	if (result == SOCKET_ERROR)
 	{
-		int errorCode = ::WSAGetLastError();
 		throw std::system_error(
-			errorCode,
-			std::system_category(),
-			"failed to close socket send stream: shutdown(SD_SEND)");
+			last_error, std::system_category(), "failed to close socket send stream: shutdown(SD_SEND)");
 	}
 }
 
@@ -474,20 +615,23 @@ void cppcoro::net::socket::close_recv()
 	int result = ::shutdown(m_handle, SD_RECEIVE);
 	if (result == SOCKET_ERROR)
 	{
-		int errorCode = ::WSAGetLastError();
 		throw std::system_error(
-			errorCode,
+			last_error,
 			std::system_category(),
 			"failed to close socket receive stream: shutdown(SD_RECEIVE)");
 	}
 }
 
+#if CPPCORO_OS_WINNT
 cppcoro::net::socket::socket(
-	cppcoro::detail::win32::socket_t handle,
-	bool skipCompletionOnSuccess) noexcept
+	cppcoro::detail::win32::socket_t handle, bool skipCompletionOnSuccess) noexcept
 	: m_handle(handle)
 	, m_skipCompletionOnSuccess(skipCompletionOnSuccess)
+#elif CPPCORO_OS_LINUX
+cppcoro::net::socket::socket(
+	cppcoro::detail::lnx::io_queue& ioQueue, cppcoro::detail::lnx::fd_t handle) noexcept
+	: m_handle(handle)
+	, m_ioQueue(ioQueue)
+#endif
 {
 }
-
-#endif

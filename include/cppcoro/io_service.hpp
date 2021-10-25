@@ -12,6 +12,10 @@
 #if CPPCORO_OS_WINNT
 # include <cppcoro/detail/win32.hpp>
 #endif
+#if CPPCORO_OS_LINUX
+#include <cppcoro/detail/linux.hpp>
+#include <cppcoro/detail/linux_uring_queue.hpp>
+#endif
 
 #include <optional>
 #include <chrono>
@@ -43,7 +47,11 @@ namespace cppcoro
 		/// actively processing events.
 		/// Note that the number of active threads may temporarily go
 		/// above this number.
-		io_service(std::uint32_t concurrencyHint);
+#if CPPCORO_OS_WINNT
+        io_service(std::uint32_t concurrencyHint);
+#elif CPPCORO_OS_LINUX
+        io_service(size_t queue_length);
+#endif
 
 		~io_service();
 
@@ -135,11 +143,18 @@ namespace cppcoro
 #if CPPCORO_OS_WINNT
 		detail::win32::handle_t native_iocp_handle() noexcept;
 		void ensure_winsock_initialised();
+#elif CPPCORO_OS_LINUX
+		detail::lnx::io_queue& io_queue() noexcept {
+		    return m_uq;
+		}
 #endif
 
 	private:
 
+#if CPPCORO_OS_WINNT
 		class timer_thread_state;
+#endif
+
 		class timer_queue;
 
 		friend class schedule_operation;
@@ -156,7 +171,9 @@ namespace cppcoro
 
 		void post_wake_up_event() noexcept;
 
+#if CPPCORO_OS_WINNT
 		timer_thread_state* ensure_timer_thread_started();
+#endif
 
 		static constexpr std::uint32_t stop_requested_flag = 1;
 		static constexpr std::uint32_t active_thread_count_increment = 2;
@@ -174,12 +191,19 @@ namespace cppcoro
 		std::mutex m_winsockInitialisationMutex;
 #endif
 
+#if CPPCORO_OS_LINUX
+		detail::lnx::io_queue m_uq;
+		detail::lnx::io_message m_nopMessage{};
+#endif
+
 		// Head of a linked-list of schedule operations that are
 		// ready to run but that failed to be queued to the I/O
 		// completion port (eg. due to low memory).
 		std::atomic<schedule_operation*> m_scheduleOperations;
 
+#if CPPCORO_OS_WINNT
 		std::atomic<timer_thread_state*> m_timerState;
+#endif
 
 	};
 
@@ -192,7 +216,7 @@ namespace cppcoro
 		{}
 
 		bool await_ready() const noexcept { return false; }
-		void await_suspend(cppcoro::coroutine_handle<> awaiter) noexcept;
+		void await_suspend(coroutine_handle<> awaiter) noexcept;
 		void await_resume() const noexcept {}
 
 	private:
@@ -201,9 +225,12 @@ namespace cppcoro
 		friend class io_service::timed_schedule_operation;
 
 		io_service& m_service;
-		cppcoro::coroutine_handle<> m_awaiter;
+		coroutine_handle<> m_awaiter;
 		schedule_operation* m_next;
 
+#if CPPCORO_OS_LINUX
+		detail::lnx::io_message m_message{};
+#endif
 	};
 
 	class io_service::timed_schedule_operation
@@ -224,13 +251,16 @@ namespace cppcoro
 		timed_schedule_operation& operator=(const timed_schedule_operation& other) = delete;
 
 		bool await_ready() const noexcept;
-		void await_suspend(cppcoro::coroutine_handle<> awaiter);
+		void await_suspend(coroutine_handle<> awaiter);
 		void await_resume();
 
 	private:
 
 		friend class io_service::timer_queue;
+
+#if CPPCORO_OS_WINNT
 		friend class io_service::timer_thread_state;
+#endif
 
 		io_service::schedule_operation m_scheduleOperation;
 		std::chrono::high_resolution_clock::time_point m_resumeTime;
@@ -242,6 +272,9 @@ namespace cppcoro
 
 		std::atomic<std::uint32_t> m_refCount;
 
+#if CPPCORO_OS_LINUX
+        detail::lnx::io_message m_message{};
+#endif
 	};
 
 	class io_work_scope

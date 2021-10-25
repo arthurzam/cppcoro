@@ -100,7 +100,7 @@ namespace cppcoro
 			bool await_ready() const noexcept { return false; }
 
 			CPPCORO_NOINLINE
-			bool await_suspend(cppcoro::coroutine_handle<> awaitingCoroutine)
+			bool await_suspend(coroutine_handle<> awaitingCoroutine)
 			{
 				static_assert(std::is_base_of_v<win32_overlapped_operation, OPERATION>);
 
@@ -127,7 +127,7 @@ namespace cppcoro
 				operation->m_awaitingCoroutine.resume();
 			}
 
-			cppcoro::coroutine_handle<> m_awaitingCoroutine;
+			coroutine_handle<> m_awaitingCoroutine;
 
 		};
 
@@ -186,7 +186,7 @@ namespace cppcoro
 			}
 
 			CPPCORO_NOINLINE
-			bool await_suspend(cppcoro::coroutine_handle<> awaitingCoroutine)
+			bool await_suspend(coroutine_handle<> awaitingCoroutine)
 			{
 				static_assert(std::is_base_of_v<win32_overlapped_operation_cancellable, OPERATION>);
 
@@ -367,10 +367,17 @@ namespace cppcoro
 			std::atomic<state> m_state;
 			cppcoro::cancellation_token m_cancellationToken;
 			std::optional<cppcoro::cancellation_registration> m_cancellationCallback;
-			cppcoro::coroutine_handle<> m_awaitingCoroutine;
-
+			coroutine_handle<> m_awaitingCoroutine;
 		};
-	}
+
+		using io_operation_base = win32_overlapped_operation_base;
+
+		template<typename OPERATION>
+		using io_operation = win32_overlapped_operation<OPERATION>;
+
+		template<typename OPERATION>
+		using io_operation_cancellable = win32_overlapped_operation_cancellable<OPERATION>;
+	}  // namespace detail
 }
 
 #endif

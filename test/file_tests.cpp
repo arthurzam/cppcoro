@@ -29,13 +29,19 @@ namespace fs = cppcoro::filesystem;
 
 namespace
 {
+    template <bool use_current_dir = false>
 	class temp_dir_fixture
 	{
 	public:
 
 		temp_dir_fixture()
 		{
-			auto tempDir = fs::temp_directory_path();
+			fs::path tempDir;
+			if constexpr (use_current_dir) {
+                tempDir = fs::current_path() / "tmp";
+			} else {
+                tempDir = fs::temp_directory_path();
+			}
 
 			std::random_device random;
 			for (int attempt = 1;; ++attempt)
@@ -72,14 +78,23 @@ namespace
 
 	};
 
+    template <bool use_current_dir = false>
 	class temp_dir_with_io_service_fixture :
 		public io_service_fixture,
-		public temp_dir_fixture
+		public temp_dir_fixture<use_current_dir>
 	{
 	};
 }
 
-TEST_CASE_FIXTURE(temp_dir_fixture, "write a file")
+#ifdef CPPCORO_TESTS_LIMITED_RESOURCES
+using tmp_dir_fixture = temp_dir_fixture<true>;
+using tmp_dir_with_io_service_fixture = temp_dir_with_io_service_fixture<true>;
+#else
+using tmp_dir_fixture = temp_dir_fixture<>;
+using tmp_dir_with_io_service_fixture = temp_dir_with_io_service_fixture<>;
+#endif
+
+TEST_CASE_FIXTURE(tmp_dir_fixture, "write a file")
 {
 	auto filePath = temp_dir() / "foo";
 
@@ -143,7 +158,7 @@ TEST_CASE_FIXTURE(temp_dir_fixture, "write a file")
 		}()));
 }
 
-TEST_CASE_FIXTURE(temp_dir_with_io_service_fixture, "read write file")
+TEST_CASE_FIXTURE(tmp_dir_with_io_service_fixture, "read write file")
 {
 	auto run = [&]() -> cppcoro::task<>
 	{
@@ -168,7 +183,7 @@ TEST_CASE_FIXTURE(temp_dir_with_io_service_fixture, "read write file")
 	cppcoro::sync_wait(run());
 }
 
-TEST_CASE_FIXTURE(temp_dir_with_io_service_fixture, "cancel read")
+TEST_CASE_FIXTURE(tmp_dir_with_io_service_fixture, "cancel read")
 {
 	cppcoro::sync_wait([&]() -> cppcoro::task<>
 	{
